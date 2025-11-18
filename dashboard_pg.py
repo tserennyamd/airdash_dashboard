@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Sat Nov 15 21:25:24 2025
+Created on Sun Nov 16 13:16:11 2025
 
 @author: tserennyamsanjsuren
 """
-
-
 
 
 from datetime import date as _date
@@ -676,9 +674,10 @@ points_alt = st.sidebar.slider(
     20_000, 200_000, 60_000, 20_000,
     key="pts_alt",
 )
+
 points_map = st.sidebar.slider(
     "Max points for Map",
-    20_000, 200_000, 60_000, 20_000,
+    20_000, 200_000, 200_000, 20_000,   # ← DEFAULT NOW 200,000
     key="pts_map",
 )
 
@@ -687,6 +686,7 @@ if st.sidebar.button("Clear cache & rerun"):
     st.rerun()
 
 st.markdown(
+
     """
 <style>
 .stTabs { margin-top: 0.8rem; }
@@ -969,14 +969,37 @@ with tab_map:
                 sub["dir_flag"] = sub["dir_flag"].astype("string").astype(cat_dir)
 
                 # Apply filters
-                if dir_choice != "All":
-                    sub = sub[sub["dir_flag"] == dir_choice]
-                sub = sub[sub["alt_ft"].between(alt_min, alt_max)]
+# Apply filters
+            if dir_choice != "All":
+             sub = sub[sub["dir_flag"] == dir_choice]
+
+# Basic altitude filter from slider
+             sub = sub[sub["alt_ft"].between(alt_min, alt_max)]
+
+# --- Keep only "long" paths in the corridor ---
+# 1) Require a minimum number of points per callsign (inside corridor)
+             MIN_POINTS_PER_PATH = 50   # you can tweak this (8, 10, 15, …)
+
+             sizes = (
+    sub.groupby(["callsign", "dir_flag"])["ts_utc"]
+       .transform("size")
+)
+             sub = sub[sizes >= MIN_POINTS_PER_PATH]
+
+# 2) Optionally also require some span across the box
+#    (skip very short zig-zags or tiny segments)
+            lon_span = sub.groupby(["callsign", "dir_flag"])["lon"].transform(lambda s: s.max() - s.min())
+            lat_span = sub.groupby(["callsign", "dir_flag"])["lat"].transform(lambda s: s.max() - s.min())
+
+            MIN_LON_SPAN = 1.0   # degrees
+            MIN_LAT_SPAN = 0.3   # degrees
+
+            sub = sub[(lon_span.abs() >= MIN_LON_SPAN) | (lat_span.abs() >= MIN_LAT_SPAN)]
 
                 # ---- Build line paths per callsign (PathLayer) ----
-                span = max(1, (ALT_MAX_FT - ALT_MIN_FT))
-                records = []
-                for (cs, dflag), g in sub.groupby(["callsign", "dir_flag"], sort=False):
+            span = max(1, (ALT_MAX_FT - ALT_MIN_FT))
+            records = []
+            for (cs, dflag), g in sub.groupby(["callsign", "dir_flag"], sort=False):
                     if len(g) < 2:
                         continue  # need at least 2 points to draw a line
                     path = g[["lon", "lat"]].to_numpy().tolist()
@@ -992,10 +1015,10 @@ with tab_map:
                         "color": color,
                     })
 
-                paths_df = pd.DataFrame.from_records(records)
-                if paths_df.empty:
+            paths_df = pd.DataFrame.from_records(records)
+            if paths_df.empty:
                     st.warning("No paths match the current filters.")
-                else:
+            else:
                     # Layers
                     tile = pdk.Layer(
                         "TileLayer",
@@ -1241,7 +1264,7 @@ with tab_fuel:
             else:
                 # nicer label: "TYPE (share%)"
                 top_types = top_types.copy()
-                top_types["label"] = (
+                top_types["label"] = (  
                     top_types["typecode"]
                     + " (" + top_types["share_pct"].astype(str) + "%)"
                 )
