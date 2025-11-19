@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Sun Nov 16 13:16:11 2025
+Created on Sun Nov 16 15:40:04 2025
 
 @author: tserennyamsanjsuren
 """
+
 
 
 from datetime import date as _date
@@ -123,8 +124,9 @@ def get_wind_hourly(start_date_et):
     Uses:
       - approx_headwind_ms  (positive = headwind, negative = tailwind)
       - approx_crosswind_ms
+      - avg_wind_dir_deg    (wind direction in degrees)
 
-    Returns from the chosen start_date_et onward.
+    Returns all rows from the chosen start_date_et onward.
     """
     sql = text("""
         SELECT
@@ -132,11 +134,13 @@ def get_wind_hourly(start_date_et):
             approx_headwind_ms,
             approx_crosswind_ms,
             avg_wind_speed_ms,
-            avg_gs_kt
+            avg_gs_kt,
+            avg_wind_dir_deg
         FROM core.corridor_wind_hourly
         WHERE hour_et >= :start
         ORDER BY hour_et;
     """)
+
     with engine.connect() as cn:
         df = pd.read_sql(sql, cn, params={"start": start_date_et})
 
@@ -154,6 +158,7 @@ def get_wind_hourly(start_date_et):
     df["day_et"] = df["hour_et"].dt.date
 
     return df
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_top_aircraft_types(start_day, end_day, limit: int = 10) -> pd.DataFrame:
     """
@@ -912,6 +917,17 @@ with tab_daily:
             st.error(f"Daily Explorer error: {e}")
 
 # ---------- Flight Tracks Map ----------
+
+WAYPOINTS = [
+    {"name": "Sea Isle",      "lat": 39.0955089, "lon": -74.8003439},
+    {"name": "Armel",         "lat": 38.9345925, "lon": -77.4667017},
+    {"name": "Coyle",         "lat": 39.8173381, "lon": -74.4316258},
+    {"name": "Robbinsville",  "lat": 40.2024022, "lon": -74.4950261},
+    {"name": "Lancaster",     "lat": 40.1199756, "lon": -76.2912953},
+    {"name": "Kennedy",       "lat": 40.6328839, "lon": -73.7713917},
+]
+
+
 with tab_map:
     st.title("Corridor Flight Tracks")
     if not days_available:
@@ -1041,6 +1057,16 @@ with tab_map:
                         get_line_color=[60, 120, 255, 200],
                         line_width_min_pixels=2,
                     )
+                    # Waypoints Layer
+                    waypoint_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                     data=WAYPOINTS,
+                     get_position=["lon", "lat"],
+                     get_color=[255, 255, 0, 200],  # yellow markers
+                      get_radius=5000,
+                     pickable=True,
+                     )
+
                     tracks = pdk.Layer(
                         "PathLayer",
                         data=paths_df,
@@ -1060,10 +1086,15 @@ with tab_map:
                         pitch=0,
                     )
                     deck = pdk.Deck(
-                        layers=[tile, bbox_layer, tracks],
-                        initial_view_state=view,
-                        map_style=None,
-                        tooltip={"text": "{callsign}\nDir: {dir_flag}\nMean alt: {alt_mean} ft"},
+                       layers=[tile, bbox_layer, tracks, waypoint_layer],
+                       initial_view_state=view,
+                       map_style=None,
+tooltip={
+    "html": "<b>{name}</b><br/>Lat: {lat}<br/>Lon: {lon}<br/>"
+            "<b>{callsign}</b><br/>Dir: {dir_flag}<br/>Mean alt: {alt_mean} ft",
+    "style": {"color": "white"}
+},
+
                     )
                     st.pydeck_chart(deck)
                     st.caption(f"{len(paths_df):,} paths")
@@ -1101,8 +1132,9 @@ with tab_map:
         except Exception as e:
             st.error(f"Map error: {e}")
 # ---------- Wind Effect Tab (inside Overview) ----------
+# ---------- Wind Effect Tab ----------
 with tab_wind:
-    st.title("Wind Effect — Headwind & Crosswind Distribution")
+    st.title("Wind Effect — Headwind, Crosswind, Direction")
 
     # Load hourly wind-effect data from corridor_wind_hourly
     try:
@@ -1169,6 +1201,121 @@ with tab_wind:
                 use_container_width=True,
             )
 
+        st.markdown("---")
+
+        # ================================
+        # Wind Direction Distribution
+        # ================================
+        st.subheader("Wind Direction distribution (hourly corridor averages)")
+        st.caption("Histogram of Hourly Corridor Wind Direction (degrees)")
+
+        if "avg_wind_dir_deg" in wind_hourly.columns:
+            fig_dir = px.histogram(
+                wind_hourly,
+                x="avg_wind_dir_deg",
+                nbins=36,  # 10-degree bins
+                labels={"avg_wind_dir_deg": "Wind Direction (°)"},
+                opacity=0.75,
+                title="Wind Direction (°)",
+            )
+
+            fig_dir.update_layout(
+                bargap=0.05,
+                xaxis=dict(
+                    tickmode="array",
+                    tickvals=list(range(0, 361, 30)),  # 0°, 30°, …, 360°
+                    title="Direction (°)",
+                ),
+                yaxis_title="Count",
+                template="plotly_dark",
+                showlegend=False,
+            )
+
+            st.plotly_chart(fig_dir, use_container_width=True)
+        else:
+            st.warning("⚠️ Column 'avg_wind_dir_deg' not found in wind_hourly.")
+
+        st.markdown("---")
+
+        # ================================
+        # Wind Rose (Direction & Speed)
+        # ================================
+        st.subheader("Wind Rose (direction & speed)")
+        st.caption("Hourly average wind direction and speed in the corridor")
+
+        if (
+            not wind_hourly.empty
+            and "avg_wind_dir_deg" in wind_hourly.columns
+            and "wind_speed_kt" in wind_hourly.columns
+        ):
+            # Drop NAs just in case
+            df_rose = wind_hourly.dropna(
+                subset=["avg_wind_dir_deg", "wind_speed_kt"]
+            ).copy()
+
+            # --- Direction sectors (16-point compass) ---
+            dir_bins = np.arange(-11.25, 371.25, 22.5)  # 16 sectors of 22.5°
+            dir_labels = [
+                "N", "NNE", "NE", "ENE",
+                "E", "ESE", "SE", "SSE",
+                "S", "SSW", "SW", "WSW",
+                "W", "WNW", "NW", "NNW",
+            ]
+
+            df_rose["dir_sector"] = pd.cut(
+                df_rose["avg_wind_dir_deg"] % 360,
+                bins=dir_bins,
+                labels=dir_labels,
+                include_lowest=True,
+            )
+
+            # --- Wind speed bins (knots) ---
+            speed_bins = [0, 20, 40, 60, 80, 2000]
+            speed_labels = ["0–20 kt", "20–40 kt", "40–60 kt", "60–80 kt", "80+ kt"]
+
+            df_rose["speed_bin"] = pd.cut(
+                df_rose["wind_speed_kt"],
+                bins=speed_bins,
+                labels=speed_labels,
+                include_lowest=True,
+            )
+
+            # Aggregate counts by direction + speed bin
+            rose_counts = (
+                df_rose.groupby(["dir_sector", "speed_bin"])
+                .size()
+                .reset_index(name="count")
+            )
+
+            # Ensure compass order is correct
+            rose_counts["dir_sector"] = rose_counts["dir_sector"].astype("category")
+            rose_counts["dir_sector"] = rose_counts["dir_sector"].cat.set_categories(
+                dir_labels, ordered=True
+            )
+
+            # Plot wind rose
+            fig_rose = px.bar_polar(
+                rose_counts,
+                r="count",
+                theta="dir_sector",
+                color="speed_bin",
+                category_orders={"dir_sector": dir_labels},
+                template="plotly_dark",
+                labels={
+                    "count": "Hours",
+                    "dir_sector": "Direction",
+                    "speed_bin": "Wind speed (kt)",
+                },
+            )
+
+            fig_rose.update_layout(
+                legend_title_text="Wind speed",
+                margin=dict(l=20, r=20, t=40, b=20),
+            )
+
+            st.plotly_chart(fig_rose, use_container_width=True)
+        else:
+            st.info("Wind rose not available: missing `avg_wind_dir_deg` or `wind_speed_kt`.")
 
 
 # ---------- Fuel & CO₂ Tab ----------
@@ -1182,11 +1329,7 @@ with tab_fuel:
         st.caption("Showing last 30 days because the selected start date returned no data.")
 
     # Optional: refresh aggregates from SQL with one click
-    cbtn, _ = st.columns([1, 3])
-    if cbtn.button("↻ Refresh fuel aggregates (SQL)"):
-        refresh_mv_fuel()
-        st.cache_data.clear()
-        st.rerun()
+
 
     try:
         if fuel_df.empty:
