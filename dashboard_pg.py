@@ -51,7 +51,9 @@ st.markdown(
 # =========================
 # CONSTANTS / CONNECTION
 # =========================
-DATABASE_URL = "postgresql+psycopg2://airdash:KW-triO123@127.0.0.1:65432/airdash_db"
+
+
+DATABASE_URL = "postgresql+psycopg2://airdash_user:NewStrongPassword123!@127.0.0.1:5432/airdash_db"
 
 engine = create_engine(
     DATABASE_URL,
@@ -60,6 +62,7 @@ engine = create_engine(
     max_overflow=5,
     pool_recycle=1800,
 )
+
 
 @event.listens_for(engine, "connect")
 def _set_stmt_timeout(dbapi_conn, conn_record):
@@ -1439,4 +1442,5 @@ with tab_fuel:
 
     except Exception as e:
         st.error(f"Fuel/CO₂ section error: {e}")
+
 
